@@ -1,0 +1,135 @@
+{
+  "entities": {
+    "Project": {
+      "title": "Project",
+      "description": "A top-level container for tasks and epics.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 500 },
+        "memberIds": { "type": "array", "description": "Uids of users in this project" },
+        "ownerId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "ownerId", "memberIds"]
+    },
+    "Epic": {
+      "title": "Epic",
+      "description": "A large body of work that can be broken down into smaller tasks.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "status": { "type": "string", "enum": ["To Do", "In Progress", "Done"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "name", "status"]
+    },
+    "Test": {
+      "title": "Test",
+      "description": "A testing scenario for the project.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "comments": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["Todo", "In Progress", "Passed", "Failed"] },
+        "order": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "name", "status"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "A specific piece of work to be done.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "epicId": { "type": "string" },
+        "parentTaskId": { "type": "string", "description": "Optional parent task ID for subtasks" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["To Do", "Progress", "Review", "Done"] },
+        "assigneeId": { "type": "string" },
+        "supporterId": { "type": "string" },
+        "dueDate": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "title", "status"]
+    },
+    "User": {
+      "title": "User",
+      "description": "A user of the system.",
+      "type": "object",
+      "properties": {
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "uid": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Invitation": {
+      "title": "Invitation",
+      "description": "A pending invitation for a user to join a project.",
+      "type": "object",
+      "properties": {
+        "projectId": { "type": "string" },
+        "projectName": { "type": "string" },
+        "email": { "type": "string" },
+        "inviterId": { "type": "string" },
+        "inviterName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "email", "inviterId", "status"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "A comment on a specific task.",
+      "type": "object",
+      "properties": {
+        "taskId": { "type": "string" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userPhotoURL": { "type": "string" },
+        "content": { "type": "string", "minLength": 1, "maxLength": 5000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["taskId", "userId", "userName", "content"]
+    }
+  },
+  "firestore": {
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "Collection of projects"
+    },
+    "/projects/{projectId}/epics/{epicId}": {
+      "schema": "Epic",
+      "description": "Epics within a project"
+    },
+    "/projects/{projectId}/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Tasks within a project"
+    },
+    "/projects/{projectId}/tasks/{taskId}/comments/{commentId}": {
+      "schema": "Comment",
+      "description": "Comments on a task"
+    },
+    "/projects/{projectId}/tests/{testId}": {
+      "schema": "Test",
+      "description": "Tests within a project"
+    },
+    "/invitations/{invitationId}": {
+      "schema": "Invitation",
+      "description": "Invitations for users to join projects"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    }
+  }
+}

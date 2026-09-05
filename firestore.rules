@@ -1,0 +1,167 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Entity Validations
+    function isValidProject(p) {
+      return p.name is string && p.name.size() >= 1 && p.name.size() <= 100
+        && (p.get('description', '') is string && p.get('description', '').size() <= 500)
+        && p.memberIds is list && p.memberIds.size() > 0 && p.memberIds.size() <= 100
+        && p.ownerId is string && p.ownerId.size() <= 128;
+    }
+
+    function isValidEpic(e) {
+      return isValidId(e.projectId)
+        && e.name is string && e.name.size() >= 1 && e.name.size() <= 100
+        && e.status in ['To Do', 'In Progress', 'Done'];
+    }
+
+    function isValidTask(t) {
+      return isValidId(t.projectId)
+        && t.title is string && t.title.size() >= 1 && t.title.size() <= 200
+        && (t.get('description', '') is string && t.get('description', '').size() <= 2000)
+        && t.status in ['To Do', 'Progress', 'Review', 'Done']
+        && (t.get('parentTaskId', null) == null || isValidId(t.parentTaskId));
+    }
+
+    function isValidUser(u) {
+      return u.uid == request.auth.uid
+        && u.email is string && u.email.size() <= 256;
+    }
+
+    function isValidTest(t) {
+      return isValidId(t.projectId)
+        && t.name is string && t.name.size() >= 1 && t.name.size() <= 100
+        && (t.get('description', '') is string && t.get('description', '').size() <= 1000)
+        && (t.get('comments', '') is string && t.get('comments', '').size() <= 2000)
+        && t.status in ['Todo', 'In Progress', 'Passed', 'Failed']
+        && t.order is number;
+    }
+
+    function isValidInvitation(i) {
+      return isValidId(i.projectId)
+        && i.email is string && i.email.size() > 0
+        && i.inviterId is string
+        && i.status in ['pending', 'accepted', 'declined'];
+    }
+
+    function isValidComment(c) {
+      return isValidId(c.taskId)
+        && c.userId == request.auth.uid
+        && c.userName is string && c.userName.size() > 0
+        && c.content is string && c.content.size() >= 1 && c.content.size() <= 5000;
+    }
+
+    // User Profile Rules
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidUser(incoming());
+      allow update: if isSignedIn() && request.auth.uid == userId 
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']);
+    }
+
+    // Invitation Rules
+    match /invitations/{invitationId} {
+      function isProjectMember(projectId) {
+        return isSignedIn() && (request.auth.uid in get(/databases/$(database)/documents/projects/$(projectId)).data.memberIds);
+      }
+
+      allow read: if isSignedIn() && (request.auth.token.email == existing().email || isProjectMember(existing().projectId));
+      allow create: if isSignedIn() && isProjectMember(incoming().projectId) && isValidInvitation(incoming())
+        && incoming().createdAt == request.time;
+      allow update: if isSignedIn() 
+        && (request.auth.token.email == existing().email || isProjectMember(existing().projectId))
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status']);
+      allow delete: if isSignedIn() && isProjectMember(existing().projectId);
+    }
+
+    // Project Rules
+    match /projects/{projectId} {
+      function getProject() {
+        return get(/databases/$(database)/documents/projects/$(projectId)).data;
+      }
+      
+      function isMember() {
+        return isSignedIn() && (request.auth.uid in getProject().memberIds);
+      }
+
+      allow read: if isSignedIn() && (request.auth.uid in existing().memberIds);
+      allow create: if isSignedIn() && isValidProject(incoming())
+        && incoming().ownerId == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isSignedIn() && (request.auth.uid in existing().memberIds)
+        && incoming().ownerId == existing().ownerId
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['memberIds', 'name', 'description'])
+        );
+      allow delete: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      // Epics Subcollection
+      match /epics/{epicId} {
+        allow read: if isMember();
+        allow create: if isMember() && isValidEpic(incoming())
+          && incoming().projectId == projectId
+          && incoming().createdAt == request.time;
+        allow update: if isMember() && isValidEpic(incoming())
+          && incoming().projectId == projectId
+          && incoming().createdAt == existing().createdAt;
+        allow delete: if isMember();
+      }
+
+      // Tasks Subcollection
+      match /tasks/{taskId} {
+        allow read: if isMember();
+        allow create: if isMember() && isValidTask(incoming())
+          && incoming().projectId == projectId
+          && incoming().createdAt == request.time;
+        allow update: if isMember() && isValidTask(incoming())
+          && incoming().projectId == projectId
+          && incoming().createdAt == existing().createdAt;
+        allow delete: if isMember();
+
+        // Comments Subcollection
+        match /comments/{commentId} {
+          allow read: if isMember();
+          allow create: if isMember() && isValidComment(incoming())
+            && incoming().taskId == taskId
+            && incoming().createdAt == request.time;
+          allow delete: if isMember() && (existing().userId == request.auth.uid || getProject().ownerId == request.auth.uid);
+        }
+      }
+
+      // Tests Subcollection
+      match /tests/{testId} {
+        allow read: if isMember();
+        allow create: if isMember() && isValidTest(incoming())
+          && incoming().projectId == projectId
+          && incoming().createdAt == request.time;
+        allow update: if isMember() && isValidTest(incoming())
+          && incoming().projectId == projectId
+          && incoming().createdAt == existing().createdAt;
+        allow delete: if isMember();
+      }
+
+    }
+  }
+}
