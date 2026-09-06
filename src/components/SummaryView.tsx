@@ -17,7 +17,7 @@ import { startOfWeek, endOfWeek, isWithinInterval, isSameWeek } from 'date-fns';
 import { CheckCircle2, Clock, ListTodo, AlertCircle } from 'lucide-react';
 
 export function SummaryView() {
-  const { tasks, activeProject, epics } = useProject();
+  const { tasks, activeProject } = useProject();
 
   if (!activeProject) return null;
 
@@ -94,40 +94,14 @@ export function SummaryView() {
 
         <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm flex flex-col">
           <div className="flex items-center justify-between mb-8">
-            <h3 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Active Epics</h3>
-            <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded tracking-wider">ROADMAP</span>
+            <h3 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Project Overview</h3>
+            <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-1 rounded tracking-wider">STATS</span>
           </div>
-          <div className="space-y-6 flex-1 overflow-y-auto pr-2 custom-scrollbar">
-            {epics.length === 0 ? (
-              <div className="flex-1 flex flex-col items-center justify-center text-center opacity-50 grayscale">
-                <ListTodo size={40} className="text-slate-300 mb-2" />
-                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">No epics active</p>
-              </div>
-            ) : (
-              epics.map(epic => {
-                const epicTasks = tasks.filter(t => t.epicId === epic.id);
-                const epicCompleted = epicTasks.filter(t => t.status === 'Done').length;
-                const progress = epicTasks.length > 0 ? (epicCompleted / epicTasks.length) * 100 : 0;
-                
-                return (
-                  <div key={epic.id} className="space-y-3 p-4 rounded-xl bg-slate-50 border border-slate-100 transition-all hover:bg-white hover:border-slate-200 hover:shadow-sm group">
-                    <div className="flex justify-between items-center">
-                      <div className="flex items-center gap-2">
-                        <div className="w-2 h-2 rounded-full bg-purple-500"></div>
-                        <span className="text-xs font-bold text-slate-700 tracking-tight">{epic.name}</span>
-                      </div>
-                      <span className="text-[10px] font-bold text-slate-400">{epicCompleted}/{epicTasks.length} ISSUES</span>
-                    </div>
-                    <div className="w-full bg-slate-200/50 rounded-full h-1.5 overflow-hidden">
-                      <div 
-                        className="bg-blue-600 h-full rounded-full transition-all duration-700 ease-out shadow-[0_0_8px_rgba(37,99,235,0.3)]" 
-                        style={{ width: `${progress}%` }}
-                      />
-                    </div>
-                  </div>
-                );
-              })
-            )}
+          <div className="space-y-6 flex-1 flex flex-col items-center justify-center text-center opacity-50">
+            <div className="w-20 h-20 rounded-full bg-slate-50 flex items-center justify-center mb-4 border border-slate-100 shadow-inner">
+              <CheckCircle2 size={40} className="text-blue-500" />
+            </div>
+            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest max-w-[200px]">Keep track of your project progress here</p>
           </div>
         </div>
       </div>

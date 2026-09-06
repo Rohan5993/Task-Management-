@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useAuth } from './AuthProvider';
 import { useProject } from './ProjectProvider';
 import { 
   Plus, 
@@ -8,35 +9,52 @@ import {
   ChevronDown,
   User,
   Calendar as CalendarIcon,
-  Tag
+  Tag,
+  Trash2
 } from 'lucide-react';
 import { Task, TaskStatus, UserProfile } from '../types';
 import { cn } from '../lib/utils';
-import { addDoc, collection, serverTimestamp, updateDoc, doc, getDocs, query, where, deleteDoc, Timestamp } from 'firebase/firestore';
+import { addDoc, collection, serverTimestamp, updateDoc, doc, getDocs, query, where, deleteDoc, Timestamp, writeBatch } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { format } from 'date-fns';
 import { handleFirestoreError, OperationType } from '../lib/firebase-utils';
 import { Loader2 } from 'lucide-react';
+import { generateHierarchicalId } from '../lib/task-utils';
 
 interface ListViewProps {
   onSelectTask?: (taskId: string) => void;
 }
 
 export function ListView({ onSelectTask }: ListViewProps) {
-  const { tasks, epics, activeProject, members, error: projectError } = useProject();
+  const { profile } = useAuth();
+  const { tasks, activeProject, members, error: projectError } = useProject();
   const [searchTerm, setSearchTerm] = useState('');
   const [isAddingTask, setIsAddingTask] = useState<boolean | string>(false); // string means parentTaskId
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskDescription, setNewTaskDescription] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<TaskStatus>('To Do');
-  const [selectedEpic, setSelectedEpic] = useState<string>('');
   const [selectedAssignee, setSelectedAssignee] = useState<string>('');
+  const [selectedSupporter, setSelectedSupporter] = useState<string>('');
   const [selectedStartDate, setSelectedStartDate] = useState('');
-  const [expandedEpics, setExpandedEpics] = useState<Set<string>>(new Set());
+  const [selectedDueDate, setSelectedDueDate] = useState('');
+  const [selectedPriority, setSelectedPriority] = useState<'Low' | 'Medium' | 'High'>('Medium');
   const [expandedTasks, setExpandedTasks] = useState<Set<string>>(new Set());
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   if (!activeProject) return null;
+
+  const toggleTask = (taskId: string) => {
+    const newExpanded = new Set(expandedTasks);
+    if (newExpanded.has(taskId)) {
+      newExpanded.delete(taskId);
+    } else {
+      newExpanded.add(taskId);
+    }
+    setExpandedTasks(newExpanded);
+  };
 
   const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -46,22 +64,35 @@ export function ListView({ onSelectTask }: ListViewProps) {
     setErrorMessage(null);
 
     try {
+      const parentId = typeof isAddingTask === 'string' ? isAddingTask : null;
+      const parentTask = parentId ? tasks.find(t => t.id === parentId) || null : null;
+      const siblings = tasks.filter(t => t.parentTaskId === (parentId || undefined));
+      const hId = generateHierarchicalId(activeProject, parentTask, siblings);
+
       const tasksPath = `projects/${activeProject.id}/tasks`;
       await addDoc(collection(db, tasksPath), {
         title: newTaskTitle,
+        description: newTaskDescription || null,
         status: selectedStatus,
-        epicId: selectedEpic || null,
-        parentTaskId: typeof isAddingTask === 'string' ? isAddingTask : null,
+        epicId: null,
+        parentTaskId: parentId,
+        hierarchicalId: hId,
         assigneeId: selectedAssignee || null,
-        startDate: selectedStartDate ? Timestamp.fromDate(new Date(selectedStartDate)) : null,
+        supporterId: selectedSupporter || null,
+        startDate: selectedStartDate ? Timestamp.fromDate(new Date(selectedStartDate + 'T00:00:00')) : null,
+        dueDate: selectedDueDate ? Timestamp.fromDate(new Date(selectedDueDate + 'T00:00:00')) : null,
+        priority: selectedPriority,
+        reporterId: profile?.uid || null,
         projectId: activeProject.id,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
       setNewTaskTitle('');
-      setSelectedEpic('');
+      setNewTaskDescription('');
       setSelectedAssignee('');
+      setSelectedSupporter('');
       setSelectedStartDate('');
+      setSelectedDueDate('');
       setIsAddingTask(false);
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, `projects/${activeProject.id}/tasks`);
@@ -82,26 +113,49 @@ export function ListView({ onSelectTask }: ListViewProps) {
     }
   };
 
-  const toggleEpic = (epicId: string) => {
-    const next = new Set(expandedEpics);
-    if (next.has(epicId)) next.delete(epicId);
-    else next.add(epicId);
-    setExpandedEpics(next);
-  };
-
-  const toggleTask = (taskId: string) => {
-    const next = new Set(expandedTasks);
-    if (next.has(taskId)) next.delete(taskId);
-    else next.add(taskId);
-    setExpandedTasks(next);
-  };
-
   const handleDeleteTask = async (taskId: string) => {
-    if (!activeProject || !window.confirm('Are you sure you want to delete this task?')) return;
+    if (!activeProject || isDeleting) return;
+    
+    setIsDeleting(true);
+    setErrorMessage(null);
+    console.log('Delete started for task:', taskId);
+
     try {
-      await deleteDoc(doc(db, 'projects', activeProject.id, 'tasks', taskId));
+      const batch = writeBatch(db);
+      
+      // 1. Find subtasks
+      const subtasksRef = collection(db, 'projects', activeProject.id, 'tasks');
+      const q = query(subtasksRef, where('parentTaskId', '==', taskId));
+      const subtaskDocs = await getDocs(q);
+      
+      // 2. Add subtasks to batch
+      for (const d of subtaskDocs.docs) {
+        batch.delete(d.ref);
+        
+        // Try to find comments for subtasks (optional, non-blocking if limit hit)
+        const subCommentsRef = collection(db, 'projects', activeProject.id, 'tasks', d.id, 'comments');
+        const subComments = await getDocs(subCommentsRef);
+        subComments.docs.forEach(cd => batch.delete(cd.ref));
+      }
+
+      // 3. Add parent task comments
+      const parentCommentsRef = collection(db, 'projects', activeProject.id, 'tasks', taskId, 'comments');
+      const parentComments = await getDocs(parentCommentsRef);
+      parentComments.docs.forEach(cd => batch.delete(cd.ref));
+
+      // 4. Add the task itself
+      batch.delete(doc(db, 'projects', activeProject.id, 'tasks', taskId));
+
+      // 5. Commit
+      await batch.commit();
+      console.log('Delete successful');
+      setConfirmDeleteId(null);
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `projects/${activeProject.id}/tasks/${taskId}`);
+      console.error('Delete error:', error);
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      setErrorMessage(`Failed to delete task: ${errorMsg}`);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -111,13 +165,6 @@ export function ListView({ onSelectTask }: ListViewProps) {
 
   const mainTasks = filteredTasks.filter(t => !t.parentTaskId);
   const subtasks = filteredTasks.filter(t => t.parentTaskId);
-
-  const tasksByEpic = epics.reduce((acc, epic) => {
-    acc[epic.id] = mainTasks.filter(t => t.epicId === epic.id);
-    return acc;
-  }, {} as Record<string, Task[]>);
-
-  const noEpicTasks = mainTasks.filter(t => !t.epicId);
 
   const StatusBadge = ({ status }: { status: TaskStatus }) => {
     const colors = {
@@ -158,12 +205,19 @@ export function ListView({ onSelectTask }: ListViewProps) {
         </div>
       </div>
 
+      {errorMessage && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center justify-between animate-in slide-in-from-top-2">
+          <p className="text-sm font-bold text-red-600 uppercase tracking-widest">{errorMessage}</p>
+          <button onClick={() => setErrorMessage(null)} className="text-red-400 hover:text-red-600 transition-all text-xs font-bold uppercase tracking-widest">Dismiss</button>
+        </div>
+      )}
+
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100 bg-slate-50/50">
               <th className="px-6 py-4 tracking-widest w-12"></th>
-              <th className="px-6 py-4 tracking-widest">Issue / Epic</th>
+              <th className="px-6 py-4 tracking-widest">Issue</th>
               <th className="px-6 py-4 tracking-widest">Status</th>
               <th className="px-6 py-4 tracking-widest">Assignee</th>
               <th className="px-6 py-4 tracking-widest">Start Date</th>
@@ -171,45 +225,29 @@ export function ListView({ onSelectTask }: ListViewProps) {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-50">
-            {/* Epics Sections */}
-            {epics.map(epic => (
-              <React.Fragment key={epic.id}>
-                <tr className="bg-slate-50/30 hover:bg-slate-50 transition-colors cursor-pointer group" onClick={() => toggleEpic(epic.id)}>
-                  <td className="px-6 py-4">
-                    {expandedEpics.has(epic.id) ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}
-                  </td>
-                  <td className="px-6 py-4 flex items-center gap-2" colSpan={4}>
-                    <div className="w-2 h-2 rounded-full bg-purple-500 shadow-[0_0_8px_rgba(168,85,247,0.4)]"></div>
-                    <span className="text-[11px] font-bold text-slate-700 uppercase tracking-tight">{epic.name}</span>
-                    <span className="text-[9px] font-bold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded tracking-wider ml-2">EPIC</span>
-                  </td>
-                  <td className="px-6 py-4"></td>
-                </tr>
-                {expandedEpics.has(epic.id) && tasksByEpic[epic.id].map(task => (
-                  <React.Fragment key={task.id}>
+            {mainTasks.map(task => (
+              <React.Fragment key={task.id}>
+                <TaskRow 
+                  task={task} 
+                  members={members} 
+                  onStatusChange={handleStatusChange} 
+                  onDeleteTask={(id) => setConfirmDeleteId(id)}
+                  hasSubtasks={subtasks.some(s => s.parentTaskId === task.id)}
+                  isExpanded={expandedTasks.has(task.id)}
+                  onToggle={() => toggleTask(task.id)}
+                  onAddSubtask={() => setIsAddingTask(task.id)}
+                  onSelectTask={onSelectTask}
+                />
+                {expandedTasks.has(task.id) && subtasks.filter(s => s.parentTaskId === task.id).map(sub => (
+                  <React.Fragment key={sub.id}>
                     <TaskRow 
-                      task={task} 
+                      task={sub} 
                       members={members} 
                       onStatusChange={handleStatusChange} 
-                      onDeleteTask={handleDeleteTask}
-                      hasSubtasks={subtasks.some(s => s.parentTaskId === task.id)}
-                      isExpanded={expandedTasks.has(task.id)}
-                      onToggle={() => toggleTask(task.id)}
-                      onAddSubtask={() => setIsAddingTask(task.id)}
+                      onDeleteTask={(id) => setConfirmDeleteId(id)}
+                      isSubtask 
                       onSelectTask={onSelectTask}
                     />
-                    {expandedTasks.has(task.id) && subtasks.filter(s => s.parentTaskId === task.id).map(sub => (
-                      <React.Fragment key={sub.id}>
-                        <TaskRow 
-                          task={sub} 
-                          members={members} 
-                          onStatusChange={handleStatusChange} 
-                          onDeleteTask={handleDeleteTask}
-                          isSubtask 
-                          onSelectTask={onSelectTask}
-                        />
-                      </React.Fragment>
-                    ))}
                   </React.Fragment>
                 ))}
               </React.Fragment>
@@ -236,33 +274,60 @@ export function ListView({ onSelectTask }: ListViewProps) {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Status</label>
-                <select 
-                  value={selectedStatus}
-                  onChange={(e) => setSelectedStatus(e.target.value as TaskStatus)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="To Do">To Do</option>
-                  <option value="Progress">In Progress</option>
-                  <option value="Review">Review</option>
-                  <option value="Done">Done</option>
-                </select>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Description</label>
+                <textarea
+                  value={newTaskDescription}
+                  onChange={(e) => setNewTaskDescription(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[80px]"
+                  placeholder="Add more details..."
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Status</label>
+                  <select 
+                    value={selectedStatus}
+                    onChange={(e) => setSelectedStatus(e.target.value as TaskStatus)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="To Do">To Do</option>
+                    <option value="Progress">In Progress</option>
+                    <option value="Review">Review</option>
+                    <option value="Done">Done</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Priority</label>
+                  <select 
+                    value={selectedPriority}
+                    onChange={(e) => setSelectedPriority(e.target.value as 'Low' | 'Medium' | 'High')}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="Low">Low</option>
+                    <option value="Medium">Medium</option>
+                    <option value="High">High</option>
+                  </select>
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Epic</label>
-                  <select 
-                    value={selectedEpic}
-                    onChange={(e) => setSelectedEpic(e.target.value)}
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Start Date</label>
+                  <input
+                    type="date"
+                    value={selectedStartDate}
+                    onChange={(e) => setSelectedStartDate(e.target.value)}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    disabled={typeof isAddingTask === 'string'}
-                  >
-                    <option value="">No Epic</option>
-                    {epics.map(epic => (
-                      <option key={epic.id} value={epic.id}>{epic.name}</option>
-                    ))}
-                  </select>
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Due Date</label>
+                  <input
+                    type="date"
+                    value={selectedDueDate}
+                    onChange={(e) => setSelectedDueDate(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
                 </div>
               </div>
 
@@ -281,13 +346,17 @@ export function ListView({ onSelectTask }: ListViewProps) {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Start Date</label>
-                  <input
-                    type="date"
-                    value={selectedStartDate}
-                    onChange={(e) => setSelectedStartDate(e.target.value)}
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Supporter</label>
+                  <select 
+                    value={selectedSupporter}
+                    onChange={(e) => setSelectedSupporter(e.target.value)}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
+                  >
+                    <option value="">None</option>
+                    {members.map(member => (
+                      <option key={member.uid} value={member.uid}>{member.displayName}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
               <div className="flex gap-3 pt-4">
@@ -314,6 +383,36 @@ export function ListView({ onSelectTask }: ListViewProps) {
                 </p>
               )}
             </form>
+          </div>
+        </div>
+      )}
+      {confirmDeleteId && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100] p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-8 animate-in zoom-in-95 duration-200 border border-slate-100">
+            <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center mx-auto mb-6 text-red-500">
+              <Trash2 size={32} />
+            </div>
+            <h2 className="text-xl font-bold text-slate-900 text-center mb-2">Delete Issue?</h2>
+            <p className="text-sm text-slate-500 text-center mb-8">
+              This will permanently delete this issue and all its subtasks and comments. This action cannot be undone.
+            </p>
+            <div className="flex gap-3">
+              <button
+                disabled={isDeleting}
+                onClick={() => setConfirmDeleteId(null)}
+                className="flex-1 px-4 py-3 text-xs font-bold uppercase tracking-widest text-slate-400 hover:bg-slate-50 rounded-xl transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={isDeleting}
+                onClick={() => handleDeleteTask(confirmDeleteId)}
+                className="flex-1 px-4 py-3 text-xs font-bold uppercase tracking-widest text-white bg-red-600 hover:bg-red-700 rounded-xl transition-all shadow-lg shadow-red-100 flex items-center justify-center gap-2"
+              >
+                {isDeleting && <Loader2 size={14} className="animate-spin" />}
+                {isDeleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -383,7 +482,7 @@ function TaskRow({
               </button>
             )}
           </div>
-          <span className="text-[9px] font-bold text-slate-300 uppercase tracking-widest mt-0.5">#{task.id.slice(-4)}</span>
+          <span className="text-[9px] font-bold text-slate-300 uppercase tracking-widest mt-0.5">{task.hierarchicalId || `#${task.id.slice(-4)}`}</span>
         </div>
       </td>
       <td className="px-6 py-4">

@@ -1,20 +1,12 @@
 export type TaskStatus = 'To Do' | 'Progress' | 'Review' | 'Done';
-export type EpicStatus = 'To Do' | 'In Progress' | 'Done';
 
 export interface Project {
   id: string;
   name: string;
+  key?: string; // e.g., "FX"
   description?: string;
   memberIds: string[];
   ownerId: string;
-  createdAt: Date;
-}
-
-export interface Epic {
-  id: string;
-  projectId: string;
-  name: string;
-  status: EpicStatus;
   createdAt: Date;
 }
 
@@ -23,11 +15,14 @@ export interface Task {
   projectId: string;
   epicId?: string;
   parentTaskId?: string; // For subtasks
+  hierarchicalId?: string; // e.g., "FX-1.1"
   title: string;
   description?: string;
   status: TaskStatus;
   assigneeId?: string;
   supporterId?: string;
+  reporterId?: string;
+  priority?: 'Low' | 'Medium' | 'High';
   startDate?: Date;
   dueDate?: Date;
   createdAt: Date;

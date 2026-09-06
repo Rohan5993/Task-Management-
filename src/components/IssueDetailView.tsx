@@ -20,7 +20,8 @@ import {
   Send,
   Flag,
   Calendar,
-  Hash
+  Hash,
+  Trash2
 } from 'lucide-react';
 import { Task, UserProfile, Comment, TaskStatus } from '../types';
 import { useProject } from './ProjectProvider';
@@ -36,12 +37,16 @@ import {
   updateDoc, 
   doc,
   deleteDoc,
-  Timestamp
+  getDocs,
+  where,
+  Timestamp,
+  writeBatch
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { handleFirestoreError, OperationType } from '../lib/firebase-utils';
 import { format } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
+import { generateHierarchicalId } from '../lib/task-utils';
 
 interface IssueDetailViewProps {
   taskId: string;
@@ -58,6 +63,10 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
   const [isSubmittingComment, setIsSubmittingComment] = useState(false);
   const [activeTab, setActiveTab] = useState<'comments' | 'history' | 'work-log'>('comments');
   const [isDetailsOpen, setIsDetailsOpen] = useState(true);
+  const [isCreatingSubtask, setIsCreatingSubtask] = useState(false);
+  const [newSubtaskTitle, setNewSubtaskTitle] = useState('');
+  const [showMentions, setShowMentions] = useState(false);
+  const [mentionFilter, setMentionFilter] = useState('');
 
   useEffect(() => {
     if (!activeProject || !taskId) return;
@@ -79,6 +88,10 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
     return () => unsubscribe();
   }, [activeProject, taskId]);
 
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
   if (!task || !activeProject) return null;
 
   const handleStatusChange = async (newStatus: TaskStatus) => {
@@ -89,6 +102,50 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `projects/${activeProject.id}/tasks/${task.id}`);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!activeProject || isDeleting) return;
+    
+    setIsDeleting(true);
+    setErrorMessage(null);
+    console.log('Delete started for task:', task.id);
+
+    try {
+      const batch = writeBatch(db);
+      
+      // 1. Find subtasks
+      const subtasksRef = collection(db, 'projects', activeProject.id, 'tasks');
+      const q = query(subtasksRef, where('parentTaskId', '==', task.id));
+      const subtaskDocs = await getDocs(q);
+      
+      // 2. Add subtasks and their comments to batch
+      for (const d of subtaskDocs.docs) {
+        batch.delete(d.ref);
+        const subCommentsRef = collection(db, 'projects', activeProject.id, 'tasks', d.id, 'comments');
+        const subComments = await getDocs(subCommentsRef);
+        subComments.docs.forEach(cd => batch.delete(cd.ref));
+      }
+
+      // 3. Add parent task comments
+      const parentCommentsRef = collection(db, 'projects', activeProject.id, 'tasks', task.id, 'comments');
+      const parentComments = await getDocs(parentCommentsRef);
+      parentComments.docs.forEach(cd => batch.delete(cd.ref));
+
+      // 4. Add the task itself
+      batch.delete(doc(db, 'projects', activeProject.id, 'tasks', task.id));
+
+      // 5. Commit
+      await batch.commit();
+      console.log('Delete successful');
+      onClose();
+    } catch (error) {
+      console.error('Delete error:', error);
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      setErrorMessage(`Failed to delete issue: ${errorMsg}`);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -114,6 +171,73 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
     }
   };
 
+  const handleCreateSubtask = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSubtaskTitle.trim() || !activeProject || !profile) return;
+
+    try {
+      const siblings = tasks.filter(t => t.parentTaskId === task.id);
+      const hId = generateHierarchicalId(activeProject, task, siblings);
+
+      await addDoc(collection(db, 'projects', activeProject.id, 'tasks'), {
+        title: newSubtaskTitle,
+        description: null,
+        status: 'To Do',
+        hierarchicalId: hId,
+        parentTaskId: task.id,
+        projectId: activeProject.id,
+        reporterId: profile.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      setNewSubtaskTitle('');
+      setIsCreatingSubtask(false);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `projects/${activeProject.id}/tasks`);
+    }
+  };
+
+  const handleCommentChange = (val: string) => {
+    setNewComment(val);
+    const lastAt = val.lastIndexOf('@');
+    if (lastAt !== -1 && (lastAt === 0 || val[lastAt - 1] === ' ')) {
+      const filter = val.substring(lastAt + 1);
+      if (!filter.includes(' ')) {
+        setMentionFilter(filter);
+        setShowMentions(true);
+        return;
+      }
+    }
+    setShowMentions(false);
+  };
+
+  const insertMention = (user: UserProfile) => {
+    const lastAt = newComment.lastIndexOf('@');
+    const newVal = newComment.substring(0, lastAt) + '@' + user.displayName + ' ';
+    setNewComment(newVal);
+    setShowMentions(false);
+  };
+
+  const handleDeleteComment = async (commentId: string) => {
+    if (!activeProject) return;
+    try {
+      await deleteDoc(doc(db, 'projects', activeProject.id, 'tasks', task.id, 'comments', commentId));
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      setErrorMessage(`Failed to delete comment: ${errorMsg}`);
+    }
+  };
+
+  const handleDeleteSubtask = async (subtaskId: string) => {
+    if (!activeProject) return;
+    try {
+      await deleteDoc(doc(db, 'projects', activeProject.id, 'tasks', subtaskId));
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+      setErrorMessage(`Failed to delete subtask: ${errorMsg}`);
+    }
+  };
+
   const childTasks = tasks.filter(t => t.parentTaskId === task.id);
   const reporter = members.find(m => m.uid === activeProject.ownerId);
   const assignee = members.find(m => m.uid === task.assigneeId);
@@ -136,28 +260,29 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
       {/* Header */}
       <header className="h-14 border-b border-slate-100 flex items-center justify-between px-6 bg-white shrink-0">
         <div className="flex items-center gap-3">
-          <Zap size={18} className="text-purple-600 fill-purple-600" />
+          <FileText size={18} className="text-blue-600" />
           <span className="text-[11px] font-bold text-slate-400 tracking-widest uppercase">
-            {activeProject.name.substring(0, 3).toUpperCase()}-{task.id.slice(-2)}
+            {task.hierarchicalId || `${activeProject.name.substring(0, 3).toUpperCase()}-${task.id.slice(-2)}`}
           </span>
         </div>
         
         <div className="flex items-center gap-2">
-          <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition-all">
-            <Lock size={18} />
-          </button>
           <button className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-100 transition-all">
             <Eye size={16} />
             <span>1</span>
-          </button>
-          <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition-all">
-            <Share2 size={18} />
           </button>
           <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition-all">
             <MoreHorizontal size={18} />
           </button>
           <button className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded-lg transition-all">
             <Maximize2 size={18} />
+          </button>
+          <button 
+            onClick={() => setShowDeleteConfirm(true)}
+            className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+            title="Delete Issue"
+          >
+            <Trash2 size={18} />
           </button>
           <div className="h-6 w-[1px] bg-slate-100 mx-1"></div>
           <button 
@@ -172,7 +297,16 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Column - Scrollable */}
-        <div className="flex-1 overflow-y-auto bg-white p-10 space-y-12">
+        <div className="flex-1 overflow-y-auto bg-white flex flex-col min-w-0">
+          {/* Error Banner */}
+          {errorMessage && (
+            <div className="mx-8 mt-4 bg-red-50 border border-red-200 rounded-xl p-4 flex items-center justify-between animate-in slide-in-from-top-2">
+              <p className="text-sm font-bold text-red-600 uppercase tracking-widest">{errorMessage}</p>
+              <button onClick={() => setErrorMessage(null)} className="text-red-400 hover:text-red-600 transition-all text-xs font-bold uppercase tracking-widest">Dismiss</button>
+            </div>
+          )}
+
+          <div className="flex-1 p-10 space-y-12 overflow-y-auto">
           <div className="space-y-6">
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{task.title}</h1>
             <button className="w-8 h-8 rounded-lg border border-slate-200 flex items-center justify-center text-slate-400 hover:text-slate-900 hover:bg-slate-50 transition-all">
@@ -186,12 +320,22 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
             <div className="space-y-4">
               <div>
                 <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block mb-2">Description</label>
-                <div className="bg-slate-50 rounded-xl p-6 min-h-[160px] border border-slate-100">
-                  {task.description ? (
-                    <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{task.description}</p>
-                  ) : (
-                    <p className="text-sm text-slate-400 italic">No description provided.</p>
-                  )}
+                <div className="relative group">
+                  <textarea
+                    value={task.description || ''}
+                    onChange={async (e) => {
+                      try {
+                        await updateDoc(doc(db, 'projects', activeProject.id, 'tasks', task.id), {
+                          description: e.target.value || null,
+                          updatedAt: serverTimestamp(),
+                        });
+                      } catch (error) {
+                        handleFirestoreError(error, OperationType.UPDATE, `projects/${activeProject.id}/tasks/${task.id}`);
+                      }
+                    }}
+                    placeholder="Add more details..."
+                    className="w-full bg-slate-50 rounded-xl p-6 min-h-[160px] border border-slate-100 text-sm text-slate-700 leading-relaxed whitespace-pre-wrap focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:bg-white transition-all resize-none"
+                  />
                 </div>
               </div>
 
@@ -219,49 +363,99 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
                 <button className="p-1.5 text-slate-400 hover:text-slate-600">
                   <FileText size={16} />
                 </button>
-                <button className="p-1.5 text-slate-400 hover:text-slate-600">
+                <button 
+                  onClick={() => setIsCreatingSubtask(true)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded"
+                >
                   <Plus size={16} />
                 </button>
               </div>
             </div>
+            
+            {isCreatingSubtask && (
+              <form onSubmit={handleCreateSubtask} className="mb-4 flex gap-2 animate-in slide-in-from-top-2">
+                <input 
+                  autoFocus
+                  type="text"
+                  value={newSubtaskTitle}
+                  onChange={(e) => setNewSubtaskTitle(e.target.value)}
+                  placeholder="What needs to be done?"
+                  className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                />
+                <button 
+                  type="submit"
+                  disabled={!newSubtaskTitle.trim()}
+                  className="px-4 py-2 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                >
+                  Create
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => setIsCreatingSubtask(false)}
+                  className="px-4 py-2 text-slate-600 text-sm font-bold hover:bg-slate-50 rounded-lg"
+                >
+                  Cancel
+                </button>
+              </form>
+            )}
             
             <div className="border border-slate-100 rounded-xl overflow-hidden shadow-sm">
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50/50 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-50">
                   <tr>
                     <th className="px-4 py-3 font-bold">Work</th>
-                    <th className="px-4 py-3 font-bold">Pri...</th>
-                    <th className="px-4 py-3 font-bold">Stor...</th>
-                    <th className="px-4 py-3 font-bold">As...</th>
+                    <th className="px-4 py-3 font-bold text-center">Pri</th>
+                    <th className="px-4 py-3 font-bold text-center">As</th>
                     <th className="px-4 py-3 font-bold">Status</th>
+                    <th className="px-4 py-3 font-bold w-10"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
                   {childTasks.map(child => {
                     const childAssignee = members.find(m => m.uid === child.assigneeId);
                     return (
-                      <tr key={child.id} className="hover:bg-slate-50 transition-colors">
+                      <tr key={child.id} className="hover:bg-slate-50 transition-colors group/row">
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <FileText size={14} className="text-blue-500" />
-                            <span className="text-[10px] font-bold text-slate-400 uppercase">{activeProject.name.substring(0, 3)}-{child.id.slice(-2)}</span>
+                            <span className="text-[10px] font-bold text-slate-400 uppercase">{child.hierarchicalId || child.id.slice(-2)}</span>
                             <span className="font-medium text-slate-700">{child.title}</span>
                           </div>
                         </td>
-                        <td className="px-4 py-3"><div className="w-4 h-0.5 bg-slate-200"></div></td>
-                        <td className="px-4 py-3"><div className="w-4 h-0.5 bg-slate-200"></div></td>
                         <td className="px-4 py-3">
-                          <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-bold text-slate-600">
-                            {childAssignee?.displayName.charAt(0) || <User size={12} />}
+                          <div className="flex justify-center">
+                            <Flag size={12} className={cn(
+                              child.priority === 'High' ? "text-red-500" :
+                              child.priority === 'Medium' ? "text-amber-500" :
+                              "text-blue-500"
+                            )} />
+                          </div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex justify-center">
+                            <div className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-bold text-slate-600">
+                              {childAssignee?.displayName.charAt(0) || <User size={12} className="text-slate-300" />}
+                            </div>
                           </div>
                         </td>
                         <td className="px-4 py-3">
                           <div className={cn(
                             "inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase",
-                            child.status === 'Done' ? "bg-emerald-100 text-emerald-700" : "bg-blue-100 text-blue-700"
+                            child.status === 'Done' ? "bg-emerald-100 text-emerald-700" : 
+                            child.status === 'Progress' ? "bg-blue-100 text-blue-700" :
+                            "bg-slate-100 text-slate-500"
                           )}>
                             {child.status}
                           </div>
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button 
+                            onClick={() => handleDeleteSubtask(child.id)}
+                            className="p-1 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded opacity-0 group-hover/row:opacity-100 transition-all"
+                            title="Delete Subtask"
+                          >
+                            <Trash2 size={12} />
+                          </button>
                         </td>
                       </tr>
                     );
@@ -311,7 +505,7 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
 
             <div className="space-y-8">
               {/* Comment Input */}
-              <div className="flex gap-4">
+              <div className="flex gap-4 relative">
                 <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-bold shrink-0">
                   {profile?.displayName?.charAt(0)}
                 </div>
@@ -319,10 +513,32 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
                   <div className="relative border border-slate-200 rounded-xl bg-white overflow-hidden focus-within:ring-2 focus-within:ring-blue-500/20 focus-within:border-blue-500 transition-all">
                     <textarea 
                       value={newComment}
-                      onChange={(e) => setNewComment(e.target.value)}
-                      placeholder="Add a comment..."
+                      onChange={(e) => handleCommentChange(e.target.value)}
+                      placeholder="Add a comment... (use @ to mention)"
                       className="w-full p-4 text-sm focus:outline-none min-h-[100px] resize-none"
                     />
+                    
+                    {showMentions && (
+                      <div className="absolute bottom-full left-0 w-48 bg-white border border-slate-200 rounded-lg shadow-xl z-10 py-1 mb-2 animate-in fade-in zoom-in-95">
+                        <div className="px-3 py-1.5 text-[10px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-50">Mention user</div>
+                        <div className="max-h-40 overflow-y-auto">
+                          {members.filter(m => m.displayName.toLowerCase().includes(mentionFilter.toLowerCase())).map(member => (
+                            <button
+                              key={member.uid}
+                              type="button"
+                              onClick={() => insertMention(member)}
+                              className="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 flex items-center gap-2"
+                            >
+                              <div className="w-5 h-5 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-bold text-slate-600">
+                                {member.displayName.charAt(0)}
+                              </div>
+                              <span className="font-medium text-slate-700">{member.displayName}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     <div className="flex items-center justify-between px-4 py-2 bg-slate-50 border-t border-slate-100">
                       <div className="flex items-center gap-3 text-slate-400">
                         <span className="text-[10px] font-bold uppercase tracking-wider">Pro tip: press <kbd className="px-1 py-0.5 bg-white border border-slate-200 rounded text-slate-600">M</kbd> to comment</span>
@@ -356,6 +572,15 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
                         <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
                           {format(comment.createdAt || new Date(), 'h:mm a')}
                         </span>
+                        {comment.userId === profile?.uid && (
+                          <button 
+                            onClick={() => handleDeleteComment(comment.id)}
+                            className="p-1 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded opacity-0 group-hover:opacity-100 transition-all"
+                            title="Delete Comment"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
                       </div>
                       <p className="text-sm text-slate-700 leading-relaxed">{comment.content}</p>
                     </div>
@@ -365,34 +590,41 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
             </div>
           </section>
         </div>
+      </div>
 
-        {/* Right Sidebar - Sticky/Fixed Content */}
+      {/* Right Sidebar - Sticky/Fixed Content */}
         <aside className="w-[360px] border-l border-slate-100 bg-white flex flex-col p-6 space-y-8 overflow-y-auto">
           {/* Status Buttons */}
           <div className="flex flex-wrap gap-2">
-            <div className="relative">
+            <div className="relative group">
               <button 
                 className={cn(
                   "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all",
                   task.status === 'Done' ? "bg-emerald-100 text-emerald-700" :
                   task.status === 'Progress' ? "bg-blue-100 text-blue-700" :
+                  task.status === 'Review' ? "bg-amber-100 text-amber-700" :
                   "bg-slate-100 text-slate-700"
                 )}
               >
                 <span>{task.status}</span>
                 <ChevronDown size={14} />
               </button>
+              
+              <div className="absolute left-0 top-full mt-1 w-40 bg-white border border-slate-200 rounded-xl shadow-xl z-20 py-1 hidden group-hover:block">
+                {(['To Do', 'Progress', 'Review', 'Done'] as TaskStatus[]).map(s => (
+                  <button
+                    key={s}
+                    onClick={() => handleStatusChange(s)}
+                    className={cn(
+                      "w-full px-4 py-2 text-left text-sm font-medium hover:bg-slate-50",
+                      task.status === s ? "text-blue-600" : "text-slate-600"
+                    )}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
-            <button className="p-2 bg-slate-50 text-slate-400 rounded-lg hover:bg-slate-100">
-              <Plus size={18} />
-            </button>
-            <button className="flex items-center gap-2 px-3 py-2 bg-slate-50 text-slate-600 rounded-lg text-sm font-bold hover:bg-slate-100">
-              <Check size={16} />
-              <span>Done</span>
-            </button>
-            <button className="p-2 bg-slate-50 text-slate-400 rounded-lg hover:bg-slate-100">
-              <Zap size={18} />
-            </button>
           </div>
 
           {/* Details Accordion */}
@@ -422,9 +654,9 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
                       <span className="text-sm text-slate-500">Reporter</span>
                       <div className="flex items-center gap-2">
                         <div className="w-6 h-6 rounded-full bg-purple-600 flex items-center justify-center text-white text-[10px] font-bold">
-                          {reporter?.displayName.charAt(0) || 'S'}
+                          {reporter?.displayName?.charAt(0) || 'A'}
                         </div>
-                        <span className="text-sm font-bold text-slate-900">{reporter?.displayName || 'Steven Wong'}</span>
+                        <span className="text-sm font-bold text-slate-900">{reporter?.displayName || 'Anonymous'}</span>
                       </div>
                     </div>
 
@@ -432,8 +664,29 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
                     <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                       <span className="text-sm text-slate-500">Priority</span>
                       <div className="flex items-center gap-2">
-                        <Flag size={14} className="text-amber-500" />
-                        <span className="text-sm font-bold text-slate-900">P2 - High</span>
+                        <Flag size={14} className={cn(
+                          task.priority === 'High' ? "text-red-500" :
+                          task.priority === 'Medium' ? "text-amber-500" :
+                          "text-blue-500"
+                        )} />
+                        <select 
+                          value={task.priority || 'Medium'}
+                          onChange={async (e) => {
+                            try {
+                              await updateDoc(doc(db, 'projects', activeProject.id, 'tasks', task.id), {
+                                priority: e.target.value,
+                                updatedAt: serverTimestamp(),
+                              });
+                            } catch (error) {
+                              handleFirestoreError(error, OperationType.UPDATE, `projects/${activeProject.id}/tasks/${task.id}`);
+                            }
+                          }}
+                          className="text-sm font-bold text-slate-900 bg-transparent border-none focus:ring-0 p-0 hover:text-blue-600 cursor-pointer"
+                        >
+                          <option value="Low">Low</option>
+                          <option value="Medium">Medium</option>
+                          <option value="High">High</option>
+                        </select>
                       </div>
                     </div>
 
@@ -490,6 +743,30 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
                       </select>
                     </div>
 
+                    {/* Supporter */}
+                    <div className="grid grid-cols-[100px_1fr] items-center gap-4">
+                      <span className="text-sm text-slate-500">Supporter</span>
+                      <select 
+                        value={task.supporterId || ''}
+                        onChange={async (e) => {
+                          try {
+                            await updateDoc(doc(db, 'projects', activeProject.id, 'tasks', task.id), {
+                              supporterId: e.target.value || null,
+                              updatedAt: serverTimestamp(),
+                            });
+                          } catch (error) {
+                            handleFirestoreError(error, OperationType.UPDATE, `projects/${activeProject.id}/tasks/${task.id}`);
+                          }
+                        }}
+                        className="text-sm font-bold text-slate-400 bg-transparent border-none focus:ring-0 p-0 hover:text-blue-600"
+                      >
+                        <option value="">None</option>
+                        {members.map(m => (
+                          <option key={m.uid} value={m.uid}>{m.displayName}</option>
+                        ))}
+                      </select>
+                    </div>
+
                     {/* Time tracking */}
                     <div className="grid grid-cols-[100px_1fr] items-center gap-4">
                       <span className="text-sm text-slate-500">Time tracking</span>
@@ -531,6 +808,37 @@ export function IssueDetailView({ taskId, onClose }: IssueDetailViewProps) {
           </div>
         </aside>
       </div>
+      {/* Deletion Confirmation Modal */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100] p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-8 animate-in zoom-in-95 duration-200 border border-slate-100">
+            <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center mx-auto mb-6 text-red-500">
+              <Trash2 size={32} />
+            </div>
+            <h2 className="text-xl font-bold text-slate-900 text-center mb-2">Delete Issue?</h2>
+            <p className="text-sm text-slate-500 text-center mb-8">
+              This will permanently delete this issue and all its subtasks and comments. This action cannot be undone.
+            </p>
+            <div className="flex gap-3">
+              <button
+                disabled={isDeleting}
+                onClick={() => setShowDeleteConfirm(false)}
+                className="flex-1 px-4 py-3 text-xs font-bold uppercase tracking-widest text-slate-400 hover:bg-slate-50 rounded-xl transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={isDeleting}
+                onClick={handleDelete}
+                className="flex-1 px-4 py-3 text-xs font-bold uppercase tracking-widest text-white bg-red-600 hover:bg-red-700 rounded-xl transition-all shadow-lg shadow-red-100 flex items-center justify-center gap-2"
+              >
+                {isDeleting && <Loader2 size={14} className="animate-spin" />}
+                {isDeleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </motion.div>
   );
 }

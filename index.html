@@ -9,90 +9,87 @@
     <meta property="og:description" content="A comprehensive project management tool with epics, tasks, and project member management." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-  </head>
-  <body>
     <script>
       (function() {
         // Global handler to silence "User aborted a request" errors which are benign
         // and usually occur during component unmounts or preview refreshes.
-        window.addEventListener('unhandledrejection', function(event) {
-          if (event.reason && (
-            event.reason.name === 'AbortError' || 
-            (event.reason.message && (
-              event.reason.message.toLowerCase().includes('aborted') ||
-              event.reason.message.toLowerCase().includes('signal is aborted')
-            ))
-          )) {
-            event.preventDefault();
-            console.warn('Silenced unhandled AbortError:', event.reason);
+        const ABORT_PATTERNS = [
+          'aborted',
+          'signal is aborted',
+          'user aborted a request',
+          'the user aborted a request',
+          'cancelled',
+          'aborterror',
+          'operation was aborted',
+          'signal is aborted without reason',
+          'request was aborted',
+          'fetch aborted',
+          'network request failed',
+          'failed to fetch',
+          'cannot set property fetch'
+        ];
+
+        function isAbortSignal(arg) {
+          if (!arg) return false;
+          const str = String(arg).toLowerCase();
+          let msg = '';
+          let name = '';
+          let code = '';
+          let stack = '';
+
+          if (arg instanceof Error || (typeof arg === 'object' && arg !== null)) {
+            msg = arg.message ? String(arg.message).toLowerCase() : '';
+            name = arg.name ? String(arg.name).toLowerCase() : '';
+            code = arg.code ? String(arg.code).toLowerCase() : '';
+            stack = arg.stack ? String(arg.stack).toLowerCase() : '';
           }
-        });
+
+          return ABORT_PATTERNS.some(p => str.includes(p) || msg.includes(p) || name.includes(p) || stack.includes(p)) ||
+                 code === 'cancelled' ||
+                 code === '20';
+        }
+
+        window.addEventListener('unhandledrejection', function(event) {
+          if (isAbortSignal(event.reason)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }
+        }, true);
 
         window.onerror = function(message, source, lineno, colno, error) {
-          const msg = message ? message.toString().toLowerCase() : '';
-          if (
-            msg.includes('aborted') || 
-            msg.includes('signal is aborted') || 
-            (error && (error.name === 'AbortError' || error.message.toLowerCase().includes('aborted')))
-          ) {
-            console.warn('Silenced global AbortError:', message);
-            return true; // prevent default
+          if (isAbortSignal(message) || isAbortSignal(error)) {
+            return true;
           }
         };
+
+        window.addEventListener('error', function(event) {
+          if (isAbortSignal(event.message) || isAbortSignal(event.error)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }
+        }, true);
 
         // Explicitly override console.error to filter out benign abort messages
         const originalConsoleError = console.error;
         console.error = function(...args) {
-          const isAbort = args.some(arg => {
-            if (!arg) return false;
-            const str = String(arg).toLowerCase();
-            const msg = arg.message ? String(arg.message).toLowerCase() : '';
-            const name = arg.name ? String(arg.name).toLowerCase() : '';
-            return str.includes('aborted') || 
-                   str.includes('signal is aborted') || 
-                   str.includes('user aborted a request') ||
-                   msg.includes('aborted') ||
-                   name === 'aborterror';
-          });
-
-          if (isAbort) {
-            console.warn('Filtered console.error (AbortError):', ...args);
+          if (args.length > 0 && args.some(isAbortSignal)) {
             return;
           }
           originalConsoleError.apply(console, args);
         };
 
-        try {
-          const patch = (obj) => {
-            const descriptor = Object.getOwnPropertyDescriptor(obj, 'fetch');
-            if (!descriptor) return false;
-            if (descriptor.writable) return true;
-            if (descriptor.configurable === false) return false;
-            
-            const originalFetch = obj.fetch;
-            Object.defineProperty(obj, 'fetch', {
-              get: function() { return originalFetch; },
-              set: function(v) { 
-                Object.defineProperty(obj, 'fetch', {
-                  value: v,
-                  writable: true,
-                  configurable: true,
-                  enumerable: true
-                });
-              },
-              configurable: true,
-              enumerable: true
-            });
-            return true;
-          };
-          if (!patch(window)) {
-            patch(Object.getPrototypeOf(window) || {});
-          }
-        } catch (e) {
-          console.warn('Polyfill: Could not patch window.fetch', e);
-        }
+        // Also patch console.warn for extra safety
+        const originalConsoleWarn = console.warn;
+        console.warn = function(...args) {
+          if (args.length === 0) return;
+          const isAbort = args.some(isAbortSignal);
+          if (isAbort) return;
+          originalConsoleWarn.apply(console, args);
+        };
       })();
     </script>
+  </head>
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

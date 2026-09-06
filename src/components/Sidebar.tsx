@@ -1,18 +1,9 @@
 import React from 'react';
-import { 
-  LayoutDashboard, 
-  ListTodo, 
-  Calendar, 
-  GanttChart, 
-  Plus, 
-  LogOut,
-  FolderKanban,
-  User
-} from 'lucide-react';
+import { LayoutDashboard, ListTodo, Calendar, GanttChart, Plus, LogOut, FolderKanban, User, Trash2 } from 'lucide-react';
 import { useAuth } from './AuthProvider';
 import { useProject } from './ProjectProvider';
 import { cn } from '../lib/utils';
-import { collection, addDoc, serverTimestamp, arrayUnion, updateDoc, doc } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, arrayUnion, updateDoc, doc, deleteDoc, query, where, getDocs } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { handleFirestoreError, OperationType } from '../lib/firebase-utils';
 
@@ -26,6 +17,7 @@ export function Sidebar({ activeView, setActiveView }: SidebarProps) {
   const { projects, activeProject, setActiveProject } = useProject();
   const [isAddingProject, setIsAddingProject] = React.useState(false);
   const [newProjectName, setNewProjectName] = React.useState('');
+  const [newProjectKey, setNewProjectKey] = React.useState('');
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -34,12 +26,14 @@ export function Sidebar({ activeView, setActiveView }: SidebarProps) {
     try {
       const docRef = await addDoc(collection(db, 'projects'), {
         name: newProjectName,
+        key: newProjectKey.toUpperCase() || newProjectName.substring(0, 3).toUpperCase(),
         ownerId: profile.uid,
         memberIds: [profile.uid],
         createdAt: serverTimestamp(),
       });
       // Reset form
       setNewProjectName('');
+      setNewProjectKey('');
       setIsAddingProject(false);
       // We don't manually setActiveProject here because the ProjectProvider's 
       // snapshot listener will catch the new project and auto-select it 
@@ -47,6 +41,28 @@ export function Sidebar({ activeView, setActiveView }: SidebarProps) {
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, 'projects');
       setIsAddingProject(false);
+    }
+  };
+
+  const handleDeleteProject = async (projectId: string, projectName: string) => {
+    if (!profile || !window.confirm(`Are you sure you want to delete the project "${projectName}"? This will delete all tasks and cannot be undone.`)) return;
+
+    try {
+      // 1. Delete all tasks in the project
+      const tasksRef = collection(db, 'projects', projectId, 'tasks');
+      const taskDocs = await getDocs(tasksRef);
+      const deleteTaskPromises = taskDocs.docs.map(d => deleteDoc(d.ref));
+      await Promise.all(deleteTaskPromises);
+
+      // 2. Delete the project document
+      await deleteDoc(doc(db, 'projects', projectId));
+
+      // 3. Clear active project if deleted
+      if (activeProject?.id === projectId) {
+        setActiveProject(null);
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `projects/${projectId}`);
     }
   };
 
@@ -88,6 +104,14 @@ export function Sidebar({ activeView, setActiveView }: SidebarProps) {
                 placeholder="Project name..."
                 className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-slate-50 font-medium"
               />
+              <input
+                type="text"
+                value={newProjectKey}
+                onChange={(e) => setNewProjectKey(e.target.value.toUpperCase())}
+                placeholder="Key (e.g. FX)"
+                maxLength={5}
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-slate-50 font-medium"
+              />
               <div className="flex gap-2">
                 <button 
                   type="submit"
@@ -108,18 +132,31 @@ export function Sidebar({ activeView, setActiveView }: SidebarProps) {
 
           <div className="space-y-1">
             {projects.map((project) => (
-              <button
-                key={project.id}
-                onClick={() => setActiveProject(project)}
-                className={cn(
-                  "w-full text-left px-3 py-2 rounded-lg text-sm transition-all duration-200",
-                  activeProject?.id === project.id 
-                    ? "bg-blue-50 text-blue-700 font-semibold" 
-                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+              <div key={project.id} className="group relative">
+                <button
+                  onClick={() => setActiveProject(project)}
+                  className={cn(
+                    "w-full text-left px-3 py-2 rounded-lg text-sm transition-all duration-200 pr-10",
+                    activeProject?.id === project.id 
+                      ? "bg-blue-50 text-blue-700 font-semibold" 
+                      : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                  )}
+                >
+                  {project.name}
+                </button>
+                {project.ownerId === profile?.uid && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteProject(project.id, project.name);
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-md opacity-0 group-hover:opacity-100 transition-all"
+                    title="Delete Project"
+                  >
+                    <Trash2 size={14} />
+                  </button>
                 )}
-              >
-                {project.name}
-              </button>
+              </div>
             ))}
           </div>
         </div>

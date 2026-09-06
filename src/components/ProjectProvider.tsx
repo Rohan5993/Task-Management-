@@ -2,14 +2,13 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import { collection, query, where, onSnapshot, orderBy, doc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from './AuthProvider';
-import { Project, Epic, Task, UserProfile } from '../types';
+import { Project, Task, UserProfile } from '../types';
 import { handleFirestoreError, OperationType } from '../lib/firebase-utils';
 
 interface ProjectContextType {
   projects: Project[];
   activeProject: Project | null;
   setActiveProject: (project: Project | null) => void;
-  epics: Epic[];
   tasks: Task[];
   members: UserProfile[];
   loading: boolean;
@@ -22,7 +21,6 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProject, setActiveProject] = useState<Project | null>(null);
-  const [epics, setEpics] = useState<Epic[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [members, setMembers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -71,20 +69,12 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
   // Fetch project-specific data
   useEffect(() => {
     if (!activeProject) {
-      setEpics([]);
       setTasks([]);
       setMembers([]);
       return;
     }
 
-    const epicsRef = collection(db, 'projects', activeProject.id, 'epics');
     const tasksRef = collection(db, 'projects', activeProject.id, 'tasks');
-
-    const unsubEpics = onSnapshot(query(epicsRef, orderBy('createdAt', 'asc')), (snapshot) => {
-      setEpics(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data(), createdAt: doc.data().createdAt?.toDate() })) as Epic[]);
-    }, (err) => {
-      handleFirestoreError(err, OperationType.LIST, `projects/${activeProject.id}/epics`);
-    });
 
     const unsubTasks = onSnapshot(query(tasksRef, orderBy('createdAt', 'desc')), (snapshot) => {
       setTasks(snapshot.docs.map(doc => ({ 
@@ -111,14 +101,13 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
     });
 
     return () => {
-      unsubEpics();
       unsubTasks();
       unsubUsers();
     };
   }, [activeProject]);
 
   return (
-    <ProjectContext.Provider value={{ projects, activeProject, setActiveProject, epics, tasks, members, loading, error }}>
+    <ProjectContext.Provider value={{ projects, activeProject, setActiveProject, tasks, members, loading, error }}>
       {children}
     </ProjectContext.Provider>
   );

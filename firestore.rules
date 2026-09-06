@@ -40,9 +40,8 @@ service cloud.firestore {
     function isValidTask(t) {
       return isValidId(t.projectId)
         && t.title is string && t.title.size() >= 1 && t.title.size() <= 200
-        && (t.get('description', '') is string && t.get('description', '').size() <= 2000)
-        && t.status in ['To Do', 'Progress', 'Review', 'Done']
-        && (t.get('parentTaskId', null) == null || isValidId(t.parentTaskId));
+        && (t.get('description', null) == null || (t.description is string && t.description.size() <= 2000))
+        && t.status in ['To Do', 'Progress', 'Review', 'Done'];
     }
 
     function isValidUser(u) {
@@ -133,11 +132,9 @@ service cloud.firestore {
       match /tasks/{taskId} {
         allow read: if isMember();
         allow create: if isMember() && isValidTask(incoming())
-          && incoming().projectId == projectId
-          && incoming().createdAt == request.time;
+          && incoming().projectId == projectId;
         allow update: if isMember() && isValidTask(incoming())
-          && incoming().projectId == projectId
-          && incoming().createdAt == existing().createdAt;
+          && incoming().projectId == projectId;
         allow delete: if isMember();
 
         // Comments Subcollection

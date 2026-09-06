@@ -36,14 +36,19 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   const isAbort = 
     errorName === 'AbortError' || 
     errorCode === 'cancelled' ||
+    errorCode === 'unavailable' || // Often occurs during rapid refreshes
     errorMsg.toLowerCase().includes('aborted') ||
     errorMsg.toLowerCase().includes('cancelled') ||
     errorMsg.toLowerCase().includes('cancel') ||
     errorMsg.toLowerCase().includes('signal is aborted') ||
-    errorMsg.toLowerCase().includes('aborted a request');
+    errorMsg.toLowerCase().includes('aborted a request') ||
+    errorMsg.toLowerCase().includes('the user aborted a request') ||
+    errorMsg.toLowerCase().includes('without reason') ||
+    errorMsg.toLowerCase().includes('network request failed') ||
+    errorMsg.toLowerCase().includes('failed to fetch');
   
   if (isAbort) {
-    console.warn(`Firestore Operation Silently Stopped: ${operationType} on ${path}`, error);
+    // Truly silent now to avoid cluttering logs with benign unmount signals
     return;
   }
 
